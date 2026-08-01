@@ -1,0 +1,7 @@
+[project]
+name = "product-catalog"
+version = "0.1.0"
+description = "Order management microservice"
+
+[tool.ruff]
+line-length = 88

@@ -1,0 +1,6 @@
+.specstory/
+.venv/
+.vscode/
+pycache/
+.pytest_cache/
+.env
