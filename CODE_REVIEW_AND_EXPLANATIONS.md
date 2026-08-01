@@ -684,10 +684,3 @@ Detailed response adding description and soft-delete fields.
 Functions:
 
 - None.
-
-## Implemented Fixes
-
-1. SKU duplicate checks now match the live-record uniqueness rule used by the database index.
-2. Repository lookups now expose explicit UUID and primary-key helpers to reduce type confusion.
-3. Shared id/uuid indexes now live on each concrete model table, so they are preserved with custom constraints and indexes.
-4. Product updates now require admin authorization, matching the create/delete product policy.
