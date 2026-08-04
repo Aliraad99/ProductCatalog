@@ -1,78 +1,158 @@
-#                   Product Catalog
+# Product Catalog Service
 
+A production-minded FastAPI service for product, customer, and order management with PostgreSQL,
+Alembic migrations, JWT authentication, and transactional stock correctness.
 
+## Highlights
 
-### Project Structure
+- FastAPI + async SQLAlchemy + PostgreSQL
+- JWT-based authentication and role-based authorization
+- Idempotent order creation via `Idempotency-Key`
+- Concurrency-safe stock deduction
+- Alembic-managed schema migrations
+- Docker Compose setup for local development
+
+## Tech Stack
+
+- Python 3.13
+- FastAPI
+- SQLAlchemy (async)
+- PostgreSQL 16
+- Alembic
+- Pydantic Settings
+
+## Project Structure
 
 ```text
 src/app/
-	api/            # route handlers, dependencies, response helpers, error
+	api/            # route handlers, dependencies, response helpers, exceptions
 	core/           # config, security, database session
-	models/         # SQLAlchemy ORMM odels
-	repositories/   # DB access layer
+	models/         # SQLAlchemy models
+	repositories/   # database access layer
 	services/       # business logic layer
-	schemas/        # request/response Pydantic schemas
+	schemas/        # request/response models
 alembic/          # migration environment and revisions
-tests/            # not implemented
 ```
 
-##  Setup and Run: Docker Compose (App + PostgreSQL)
+## Quick Start (Docker)
 
-From a clean machine run:
+### 1) Prerequisites
 
+- Docker Desktop installed and running
+- Docker Compose available (`docker compose version`)
+- Ports `8000` and `5432` available
+
+### 2) Configure environment
+
+Create `.env` in the project root:
+
+```bash
+cp .env.example .env
+```
+
+For PowerShell on Windows:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+### 3) Build and run
+
+```bash
 docker compose up --build
+```
 
+The stack starts:
 
-### Authentication
+- `db` (PostgreSQL)
+- `app` (FastAPI)
 
-- All endpoints except `/api/v1/auth/*` and `/health` require Bearer JWT.
-- Role claim is used for admin-only operations (for example product creation/deletion).
+At startup, the app container runs `alembic upgrade head` before serving traffic.
 
-### Primary Key Strategy
+### 4) Verify health
 
-- Internal relational key: `BIGINT IDENTITY` (`id`) for join performance.
-- External/API key: UUID (`uuid`) using UUIDv7 generation for better index locality than random UUIDv4.
+- Health endpoint: `http://localhost:8000/health`
 
-### Constraints and Invariants
+Expected body:
 
-Invariants enforced in DB and application layer:
+```json
+{"success": true, "data": {"status": "ok"}}
+```
 
-- `CHECK (stock >= 0)` on products
-- `CHECK (unit_price >= 0)` on products and order items
-- `CHECK (quantity > 0)` on order items
-- `CHECK (total_amount >= 0)` on orders
+## Environment Variables
 
-- Unique customer email, user email, and idempotency key
+Use `.env.example` as a template.
 
-### Soft Delete and SKU Uniqueness
+Required:
 
-- Products are soft-deleted (`is_deleted`, `deleted_at`).
-- Partial unique index enforces SKU uniqueness only among live rows:
-	`uq_products_sku_active` with predicate `deleted_at IS NULL AND is_deleted = false`.
+- `JWT_SECRET`
+- `DATABASE_URL` (local non-Docker app runs)
+- `DATABASE_URL_DOCKER` (Docker Compose app container)
 
-### Order Status Representation
+Optional admin bootstrap:
 
-- Stored as a native PostgreSQL enum (`order_status`).
+- `ADMIN_EMAIL`
+- `ADMIN_PASSWORD`
 
-### Indexes and Rationale
+Database container variables:
 
-- `ix_*_id`, `ix_*_uuid`: fast primary/external lookups.
-- `uq_products_sku_active`: protects live SKU uniqueness.
-- `ix_products_active`: accelerates active product filtering.
-- `ix_orders_customer_id`: customer order listing.
-- `ix_orders_status`: status filtering.
-- `ix_orders_created_at`: recent-first queries and date range filtering.
-- `ix_order_items_order_id`, `ix_order_items_product_id`: join/query efficiency for order details and references.
+- `POSTGRES_USER`
+- `POSTGRES_PASSWORD`
+- `POSTGRES_DB`
 
-### N+1 Avoidance
+Important notes:
 
-- `selectinload` is used for loading order-with-items and customer-with-orders paths in repository methods.
+- In Docker Compose, the app should use host `db` (not `localhost`) for PostgreSQL.
+- If your secret contains `$`, quote/escape it in `.env` to avoid interpolation issues.
 
-## Concurrency and Correctness Strategy
+## API Overview
 
-### Chosen Strategy
+Base URL:
 
-Conditional write for stock deduction:
+- `http://localhost:8000`
+
+OpenAPI docs:
+
+- `http://localhost:8000/docs`
+
+Routers:
+
+- `/api/v1/auth`
+- `/api/v1/products`
+- `/api/v1/customers`
+- `/api/v1/orders`
+
+Authentication behavior:
+
+- Public: `/api/v1/auth/*`, `/health`
+- Protected: all other endpoints require Bearer JWT
+- Admin-only actions: product create/update/delete
+
+## Quick Auth Smoke Test
+
+Register:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/auth/register \
+	-H "Content-Type: application/json" \
+	-d '{"email":"admin@example.com","password":"StrongPass123!"}'
+```
+
+Login:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/auth/login \
+	-H "Content-Type: application/json" \
+	-d '{"email":"admin@example.com","password":"StrongPass123!"}'
+```
+
+Use the returned `access_token` as `Authorization: Bearer <token>`.
+
+## Data Integrity and Correctness
+
+### Stock Concurrency Strategy
+
+Stock is deducted with a conditional write:
 
 ```sql
 UPDATE products
@@ -80,90 +160,44 @@ SET stock = stock - :qty
 WHERE id = :id AND stock >= :qty AND is_deleted = false AND is_active = true
 ```
 
-The operation succeeds only if exactly one row is affected.
+This prevents overselling under concurrent requests without read-modify-write races.
 
-### Why This Works
+### Invariants
 
-- Prevents overselling without read-modify-write race.
-- Keeps stock transitions atomic at row level.
-- Works well with PostgreSQL MVCC and row-level locking behavior during update.
+- `stock >= 0`
+- `unit_price >= 0`
+- `quantity > 0`
+- `total_amount >= 0`
+- unique email constraints for users/customers
+- unique order `idempotency_key`
 
-### Deadlock Ordering
+### Idempotency
 
-- When creating orders with multiple products, product IDs are processed in sorted order.
-- Deterministic ordering reduces cyclic lock acquisition risk.
+- Same key + same payload: returns existing order
+- Same key + different payload: conflict
 
-### Idempotency Behavior
+## Pagination
 
-- `idempotency_key` has a DB unique constraint.
-- Same key + same payload returns previous order.
-- Same key + different payload returns conflict (`IDEMPOTENCY_KEY_CONFLICT`).
+Offset pagination is used with:
 
-Retention note:
+- `page`
+- `page_size` (max 100)
+- `total`
+- `has_next`
 
-- Current implementation retains keys indefinitely because they are stored on the `orders` table.
-- A production variant could add TTL archival/purge policy.
-
-### Cancellation Exactly Once
-
-- Cancellation fetches order using `SELECT ... FOR UPDATE` and applies stock restore only if status is cancellable.
-- Concurrent cancellation attempts serialize; once status changes to `CANCELLED`, subsequent attempts fail by state rule.
-
-## Pagination Choice
-
-Chosen approach: offset pagination (`page`, `page_size`, `total`, `has_next`).
-
-Reasoning:
-
-- Simpler API contract for task scope and reviewer validation.
-- Easy to combine with filters.
-- Capped `page_size` (max 100) controls query cost.
-
-Trade-off:
-
-- Offset cost grows with deeper pages; keyset pagination is better for very large scans.
-
-##  Non-Functional Notes
+## Operational Notes
 
 - Password hashing uses Argon2.
-- DB pool sizing is explicit in settings (`DB_POOL_SIZE`, `DB_MAX_OVERFLOW`).
-- Migrations are run via Alembic and Docker startup path applies migrations before serving.
-- Sensitive payloads (tokens/passwords/full credential bodies) will never be logged.
+- Database pool sizing is configurable (`DB_POOL_SIZE`, `DB_MAX_OVERFLOW`).
+- Admin bootstrap runs on startup only when both `ADMIN_EMAIL` and `ADMIN_PASSWORD` are set.
 
+## Known Gaps
 
+- Unit/integration test suite is not yet implemented.
 
-##  What Is Deliberately Not Finished Yet
+## Additional Design Notes
 
-test unit
+Detailed architecture and review rationale are documented in:
 
-## 14. Written Answers
-
-### ) Which concurrency strategy did you choose for stock deduction, and what happens to it at fifty times the load?
-
-I chose conditional writes (`UPDATE ... WHERE stock >= :qty`) for stock deduction. 
-This avoids the classic race in read-then-write logic and keeps correctness in the database where contention.
-
-### ) GET /api/v1/products needs to serve 10,000 requests per second. What breaks first, and what do you change?
-
-The first break is usually database pressure from repeated filtered reads and offset scans,
-followed by connection pool saturation and serialization overhead in the API layer. I would
-introduce a read-through cache for hot product lists/search terms, move deep pagination paths
-to keyset pagination for better asymptotic performance. At the app tier, I would profile JSON
-serialization and tune worker/process counts to match CPU and network behavior.
-
-### ) Which of your indexes would you drop first if write throughput became the bottleneck, and how would you decide?
-
-I would start by measuring index utility via `pg_stat_user_indexes` and query plans, then drop
-the least-used non-critical index first. In this schema, likely candidates are broad helper indexes
-that are not tied to strict constraints, such as an activity composite if query evidence is weak.
-I would never drop integrity-critical indexes (for example partial unique SKU) without an
-alternative guarantee. The decision is evidence-driven: low scan usage, high write amplification,
-and no regression in representative production queries after controlled rollout.
-
-### ) What did you deliberately not build, and what would you do differently with a full week?
-
-I prioritized core consistency, data integrity, and transactional behavior over optional breadth.
-With a full week, I would add observability dashboards, and migration safety checks in CI. I would also
-add load-focused profiling and tune read/write paths based on measured bottlenecks rather than
-assumptions.
+- `CODE_REVIEW_AND_EXPLANATIONS.md`
 
