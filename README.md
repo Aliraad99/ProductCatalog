@@ -191,13 +191,5 @@ Offset pagination is used with:
 - Database pool sizing is configurable (`DB_POOL_SIZE`, `DB_MAX_OVERFLOW`).
 - Admin bootstrap runs on startup only when both `ADMIN_EMAIL` and `ADMIN_PASSWORD` are set.
 
-## Known Gaps
 
-- Unit/integration test suite is not yet implemented.
-
-## Additional Design Notes
-
-Detailed architecture and review rationale are documented in:
-
-- `CODE_REVIEW_AND_EXPLANATIONS.md`
 
